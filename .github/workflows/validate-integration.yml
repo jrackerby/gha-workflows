@@ -40,7 +40,7 @@ on:
         type: string
         default: ./tools/run_tests.sh
       test-requirements:
-        description: the file the suite declares its dependencies in (LAW 15)
+        description: the file the suite declares its dependencies in (LAW 15); empty means a stdlib-only suite whose runner guards its own vacuity
         required: false
         type: string
         default: tests/requirements.txt
@@ -105,6 +105,7 @@ jobs:
         with:
           python-version: ${{ inputs.python-version }}
       - name: install what the suite declares it needs
+        if: ${{ inputs.test-requirements != '' }}
         env:
           REQS: ${{ inputs.test-requirements }}
         run: |
@@ -116,6 +117,7 @@ jobs:
       - name: run the suite
         run: ${{ inputs.test-command }}
       - name: refuse a vacuous pass
+        if: ${{ inputs.test-requirements != '' }}
         run: |
           set -euo pipefail
           cd tests
