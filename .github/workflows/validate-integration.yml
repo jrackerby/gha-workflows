@@ -54,6 +54,11 @@ on:
         required: false
         type: boolean
         default: true
+      run-imports:
+        description: run the real-core import job; false keeps a repo's gate set as it was before it called this file
+        required: false
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -129,6 +134,7 @@ jobs:
           PY
 
   imports:
+    if: ${{ inputs.run-imports }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
