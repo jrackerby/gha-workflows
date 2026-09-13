@@ -166,7 +166,7 @@ jobs:
                    ./ "stage/custom_components/$DOMAIN/"
           touch stage/custom_components/__init__.py
           cd stage
-          MODULES=$(cd "custom_components/$DOMAIN" && ls ./*.py | sed 's#^\./##;s/\.py$//' | grep -v '^__init__$')
+          MODULES=$(cd "custom_components/$DOMAIN" && find . -maxdepth 1 -name '*.py' -printf '%f\n' | sed 's/\.py$//' | grep -v '^__init__$' | sort)
           test -n "$MODULES" \
             || { echo "CANNOT RUN: no modules staged -- this would pass vacuously"; exit 1; }
           python - <<PY
