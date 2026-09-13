@@ -1,0 +1,203 @@
+name: validate-integration
+
+# ONE validate workflow for every jrackerby/* custom integration, called from
+# each repo's own .github/workflows/validate.yml via `workflow_call`. The
+# caller keeps its triggers (push/pull_request/weekly cron/dispatch) and
+# passes what differs per repo; everything that was identical across the
+# twelve copies lives here once.
+#
+# Job names are load-bearing: jrackerby/HA tools/hacs_policy_audit.py reads
+# each repo's branch protection for required contexts named `hacs` and
+# `hassfest`. A job run through a called workflow reports as
+# "<caller job> / <called job>", so the caller names its job so that the
+# reported context ends in " / hacs" and " / hassfest", and the audit's
+# required-contexts check accepts that suffix form (change tracked in HA).
+# The audit also looks for the literal strings `hacs/action@` and
+# `actions/hassfest` in the caller repo's workflow text; the caller carries a
+# `uses:` line for this file, so the audit's gates check must follow that
+# `uses:` to here (same HA change).
+
+on:
+  workflow_call:
+    inputs:
+      domain:
+        description: the integration domain (custom_components/<domain>)
+        required: true
+        type: string
+      python-version:
+        description: interpreter for the unit suite
+        required: false
+        type: string
+        default: "3.13"
+      core-python-version:
+        description: interpreter for the real-core import job (Home Assistant's Requires-Python)
+        required: false
+        type: string
+        default: "3.14"
+      test-command:
+        description: how the unit suite is run, from the repo root; empty skips the tests job
+        required: false
+        type: string
+        default: ./tools/run_tests.sh
+      test-requirements:
+        description: the file the suite declares its dependencies in (LAW 15)
+        required: false
+        type: string
+        default: tests/requirements.txt
+      public:
+        description: whether the repository is public; false makes the hacs job a VOID, never a pass
+        required: false
+        type: boolean
+        default: true
+      content-in-root:
+        description: hacs.json content_in_root -- true stages the repo root as custom_components/<domain>
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  hassfest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: src
+      # hassfest takes no path input (HA TOOLS.md, "Landing a branch"): stage
+      # the layout it scans and assert the staged manifest exists, or it
+      # passes green over zero integrations.
+      - name: stage the custom_components layout hassfest scans
+        env:
+          DOMAIN: ${{ inputs.domain }}
+          IN_ROOT: ${{ inputs.content-in-root }}
+        run: |
+          set -euo pipefail
+          if [ "$IN_ROOT" = "true" ]; then
+            mkdir -p "custom_components/$DOMAIN"
+            cp -a src/. "custom_components/$DOMAIN/"
+            rm -rf "custom_components/$DOMAIN/.git" \
+                   "custom_components/$DOMAIN/.github" \
+                   "custom_components/$DOMAIN/tests" \
+                   "custom_components/$DOMAIN/tools"
+          else
+            cp -a "src/custom_components" custom_components
+          fi
+          test -f "custom_components/$DOMAIN/manifest.json" \
+            || { echo "CANNOT RUN: staging produced no manifest.json -- hassfest would pass vacuously"; exit 1; }
+          echo "staged $(find "custom_components/$DOMAIN" -type f | wc -l) files"
+      - uses: home-assistant/actions/hassfest@master
+
+  tests:
+    if: ${{ inputs.test-command != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+      - name: install what the suite declares it needs
+        env:
+          REQS: ${{ inputs.test-requirements }}
+        run: |
+          set -euo pipefail
+          test -f "$REQS" \
+            || { echo "CANNOT RUN: $REQS is missing -- the suite's dependencies are undeclared and a pass here would be luck"; exit 1; }
+          cat "$REQS"
+          pip install -r "$REQS"
+      - name: run the suite
+        run: ${{ inputs.test-command }}
+      - name: refuse a vacuous pass
+        run: |
+          set -euo pipefail
+          cd tests
+          python - <<'PY'
+          import re, subprocess, sys
+          r = subprocess.run([sys.executable, "-m", "pytest", "--collect-only", "-q"],
+                             capture_output=True, text=True)
+          out = r.stdout + r.stderr
+          m = re.search(r"(\d+) tests? collected", out)
+          if not m:
+              sys.exit("CANNOT RUN: could not parse a collected count from "
+                       f"pytest --collect-only:\n{out[-800:]}")
+          if int(m.group(1)) == 0:
+              sys.exit("VACUOUS: pytest collected 0 tests -- a green run here would assert nothing")
+          print(f"{m.group(1)} tests collected")
+          PY
+
+  imports:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.core-python-version }}
+      - name: install the core version hacs.json claims support for
+        run: |
+          set -euo pipefail
+          FLOOR="$(python -c 'import json;print(json.load(open("hacs.json"))["homeassistant"])')"
+          echo "hacs.json floor: $FLOOR"
+          pip install "homeassistant==$FLOOR"
+      - name: install the requirements manifest.json declares
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, pathlib, sys
+          m = json.load(open("manifest.json"))
+          reqs = m.get("requirements")
+          if not isinstance(reqs, list):
+              sys.exit("CANNOT RUN: manifest.json `requirements` is not a list")
+          pathlib.Path("reqs.txt").write_text("\n".join(reqs))
+          print(f"manifest declares {len(reqs)} requirement(s): {reqs or '(none -- core only)'}")
+          PY
+          if [ -s reqs.txt ]; then xargs -r pip install < reqs.txt; else echo "nothing to install"; fi
+      - name: import every module against real core
+        env:
+          DOMAIN: ${{ inputs.domain }}
+        run: |
+          set -euo pipefail
+          mkdir -p "stage/custom_components/$DOMAIN"
+          rsync -a --exclude '.git' --exclude '.github' --exclude 'tests' \
+                   --exclude 'tools' --exclude 'stage' --exclude 'reqs.txt' \
+                   ./ "stage/custom_components/$DOMAIN/"
+          touch stage/custom_components/__init__.py
+          cd stage
+          MODULES=$(cd "custom_components/$DOMAIN" && ls ./*.py | sed 's#^\./##;s/\.py$//' | grep -v '^__init__$')
+          test -n "$MODULES" \
+            || { echo "CANNOT RUN: no modules staged -- this would pass vacuously"; exit 1; }
+          python - <<PY
+          import importlib, sys
+          sys.path.insert(0, ".")
+          mods = """$MODULES""".split()
+          failed = []
+          for m in ["__init__", *mods]:
+              name = f"custom_components.$DOMAIN.{m}" if m != "__init__" else "custom_components.$DOMAIN"
+              try:
+                  importlib.import_module(name)
+                  print(f"  ok   {name}")
+              except Exception as exc:
+                  failed.append((name, exc))
+                  print(f"  FAIL {name}: {type(exc).__name__}: {exc}")
+          if failed:
+              sys.exit(f"{len(failed)} module(s) failed to import against real core")
+          print(f"imported {len(mods) + 1} modules cleanly")
+          PY
+
+  hacs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: VOID -- HACS validation cannot run against a private repository
+        if: ${{ !inputs.public }}
+        run: |
+          echo "::notice title=HACS validation VOID::this repository is private, so HACS cannot read it (LAW 15)"
+          echo "This is a VOID, not a pass."
+      - uses: hacs/action@main
+        if: ${{ inputs.public }}
+        with:
+          category: integration

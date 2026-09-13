@@ -1,0 +1,62 @@
+name: release-integration
+
+# ONE release workflow for every jrackerby/* custom integration, called from
+# each repo's own .github/workflows/release.yml via `workflow_call`.
+#
+# HACS installs and upgrades from RELEASES. The trigger (in the caller) is a
+# push to master touching manifest.json, because that file's own `version`
+# is the number Home Assistant already shows for the integration -- a
+# separate release ritual would be a second version to keep in sync, and it
+# would drift. Tagging is idempotent on the TAG, not on the diff.
+
+on:
+  workflow_call:
+    inputs:
+      manifest-path:
+        description: where manifest.json lives (root under content_in_root, else custom_components/<domain>/manifest.json)
+        required: false
+        type: string
+        default: manifest.json
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: read the version and decide whether it is new
+        id: v
+        env:
+          MANIFEST: ${{ inputs.manifest-path }}
+        run: |
+          set -euo pipefail
+          version="$(python3 -c 'import json,os;print(json.load(open(os.environ["MANIFEST"]))["version"])')"
+          # Empty or missing would tag "v" and poison the tag namespace.
+          test -n "$version" || { echo "CANNOT RUN: $MANIFEST has no version"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          # Fires on ANY push touching the manifest, including one that edits a
+          # URL and leaves the version alone. The existence of the tag -- not
+          # the diff -- is what decides.
+          if git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
+            echo "v$version already tagged; nothing to release"
+            echo "new=0" >> "$GITHUB_OUTPUT"
+          else
+            echo "new=1" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: tag and release
+        if: steps.v.outputs.new == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          set -euo pipefail
+          git tag "v$VERSION"
+          git push origin "v$VERSION"
+          gh release create "v$VERSION" --title "v$VERSION" --generate-notes

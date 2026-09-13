@@ -1,0 +1,27 @@
+name: ci
+
+# The only thing this repository ships is workflow YAML, so the gate is the
+# workflow linter. It is the required context on master; nothing lands here
+# without it.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  actionlint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: install actionlint from its release
+        run: |
+          set -euo pipefail
+          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          ./actionlint -version
+      - name: lint every workflow, the reusable ones included
+        run: ./actionlint -color
