@@ -54,6 +54,11 @@ on:
         required: false
         type: boolean
         default: true
+      pytest-guard:
+        description: after the suite, assert `pytest --collect-only` in tests/ finds something; false for a suite whose runner guards its own vacuity
+        required: false
+        type: boolean
+        default: true
       run-imports:
         description: run the real-core import job; false keeps a repo's gate set as it was before it called this file
         required: false
@@ -117,7 +122,7 @@ jobs:
       - name: run the suite
         run: ${{ inputs.test-command }}
       - name: refuse a vacuous pass
-        if: ${{ inputs.test-requirements != '' }}
+        if: ${{ inputs.test-requirements != '' && inputs.pytest-guard }}
         run: |
           set -euo pipefail
           cd tests
