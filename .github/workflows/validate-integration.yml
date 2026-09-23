@@ -168,6 +168,49 @@ jobs:
           print(f"manifest declares {len(reqs)} requirement(s): {reqs or '(none -- core only)'}")
           PY
           if [ -s reqs.txt ]; then xargs -r pip install < reqs.txt; else echo "nothing to install"; fi
+      # A core integration's OWN requirements are installed by Home Assistant
+      # when that integration is set up, not by `pip install homeassistant`.
+      # An integration that imports one (`from homeassistant.components.stream
+      # import Stream`) therefore needs it DECLARED, and this step installs
+      # what the declaration promises. It is deliberately driven by
+      # `dependencies` / `after_dependencies` and not by scanning imports: an
+      # import of an undeclared component is a real defect (nothing guarantees
+      # that component is set up on the user's instance), and leaving it to
+      # fail below is this job reporting it. Measured on jrackerby/nanit#44,
+      # 2026-09-23: `camera.py` imports `homeassistant.components.stream`,
+      # whose requirements are `av` and `numpy`, and the manifest declared
+      # neither the component nor them -- the platform would fail to import on
+      # any instance without `stream` set up.
+      - name: install the requirements of the core integrations this one declares
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, pathlib, subprocess, sys
+
+          import homeassistant.components as components
+
+          root = pathlib.Path(components.__path__[0])
+          manifest = json.load(open("manifest.json"))
+          declared = [
+              *manifest.get("dependencies", []),
+              *manifest.get("after_dependencies", []),
+          ]
+          if not declared:
+              print("manifest declares no core dependencies")
+              sys.exit(0)
+          reqs: list[str] = []
+          for domain in declared:
+              path = root / domain / "manifest.json"
+              if not path.is_file():
+                  print(f"  {domain}: not a core integration at this version, skipped")
+                  continue
+              own = json.loads(path.read_text()).get("requirements", [])
+              print(f"  {domain}: {own or '(no requirements)'}")
+              reqs.extend(own)
+          if reqs:
+              subprocess.run([sys.executable, "-m", "pip", "install", *reqs], check=True)
+          PY
+
       - name: import every module against real core
         env:
           DOMAIN: ${{ inputs.domain }}
@@ -196,6 +239,16 @@ jobs:
                   failed.append((name, exc))
                   print(f"  FAIL {name}: {type(exc).__name__}: {exc}")
           if failed:
+              if any(isinstance(exc, ModuleNotFoundError) for _, exc in failed):
+                  print(
+                      "\nA ModuleNotFoundError for a third-party package usually means "
+                      "this integration imports a CORE COMPONENT it does not declare in "
+                      "manifest.json `dependencies`. A core integration's requirements "
+                      "are installed when it is set up, so an undeclared one is absent "
+                      "here -- and absent on any instance that does not happen to set it "
+                      "up. Declare the component, do not add its packages to this "
+                      "manifest's `requirements`."
+                  )
               sys.exit(f"{len(failed)} module(s) failed to import against real core")
           print(f"imported {len(mods) + 1} modules cleanly")
           PY
