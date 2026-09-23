@@ -181,35 +181,61 @@ jobs:
       # whose requirements are `av` and `numpy`, and the manifest declared
       # neither the component nor them -- the platform would fail to import on
       # any instance without `stream` set up.
+      # THIS STEP RUNS AT THE REPO ROOT, WHICH IS A MINEFIELD FOR sys.path.
+      # A `content_in_root` integration keeps its own modules there, so
+      # `select.py` shadows the stdlib `select` for anything that reaches for
+      # it -- and `import subprocess` does, through asyncio. Measured on
+      # jrackerby/nanit#45 (2026-09-23): "AttributeError: partially
+      # initialized module 'subprocess' ... has no attribute 'PIPE'", from
+      # nanit's own select.py. Hence all three defences here: `-I` drops the
+      # working directory from sys.path, `sysconfig` locates core WITHOUT
+      # importing it (importing `homeassistant.components` reaches asyncio
+      # and trips the same shadow), and pip is run by the shell rather than
+      # through `subprocess`. The step below is safe only because it `cd
+      # stage` first.
       - name: install the requirements of the core integrations this one declares
         run: |
           set -euo pipefail
-          python - <<'PY'
-          import json, pathlib, subprocess, sys
+          python -I - <<'PY'
+          import json, pathlib, sysconfig
 
-          import homeassistant.components as components
-
-          root = pathlib.Path(components.__path__[0])
-          manifest = json.load(open("manifest.json"))
+          manifest = json.loads(pathlib.Path("manifest.json").read_text())
           declared = [
               *manifest.get("dependencies", []),
               *manifest.get("after_dependencies", []),
           ]
-          if not declared:
-              print("manifest declares no core dependencies")
-              sys.exit(0)
-          reqs: list[str] = []
+          paths = sysconfig.get_paths()
+          roots = [
+              pathlib.Path(p) / "homeassistant" / "components"
+              for p in dict.fromkeys([paths["purelib"], paths["platlib"]])
+          ]
+          # Without this, core installed anywhere but purelib/platlib would
+          # print "skipped" for every domain, install nothing, and let the
+          # import step below fail for a reason that reads like the caller's
+          # defect. A gate that can pass vacuously is not a gate (LAW 15).
+          if not any(root.is_dir() for root in roots):
+              raise SystemExit(
+                  "CANNOT RUN: no homeassistant/components under "
+                  + " or ".join(str(root) for root in roots)
+              )
+          reqs = []
           for domain in declared:
-              path = root / domain / "manifest.json"
-              if not path.is_file():
+              for root in roots:
+                  path = root / domain / "manifest.json"
+                  if path.is_file():
+                      own = json.loads(path.read_text()).get("requirements", [])
+                      print(f"  {domain}: {own or '(no requirements)'}")
+                      reqs.extend(own)
+                      break
+              else:
                   print(f"  {domain}: not a core integration at this version, skipped")
-                  continue
-              own = json.loads(path.read_text()).get("requirements", [])
-              print(f"  {domain}: {own or '(no requirements)'}")
-              reqs.extend(own)
-          if reqs:
-              subprocess.run([sys.executable, "-m", "pip", "install", *reqs], check=True)
+          pathlib.Path("reqs-core.txt").write_text("\n".join(reqs))
           PY
+          if [ -s reqs-core.txt ]; then
+            xargs -r pip install < reqs-core.txt
+          else
+            echo "no core dependency requirements to install"
+          fi
 
       - name: import every module against real core
         env:
@@ -219,6 +245,7 @@ jobs:
           mkdir -p "stage/custom_components/$DOMAIN"
           rsync -a --exclude '.git' --exclude '.github' --exclude 'tests' \
                    --exclude 'tools' --exclude 'stage' --exclude 'reqs.txt' \
+                   --exclude 'reqs-core.txt' \
                    ./ "stage/custom_components/$DOMAIN/"
           touch stage/custom_components/__init__.py
           cd stage
