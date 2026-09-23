@@ -240,14 +240,18 @@ jobs:
                   print(f"  FAIL {name}: {type(exc).__name__}: {exc}")
           if failed:
               if any(isinstance(exc, ModuleNotFoundError) for _, exc in failed):
+                  # No backticks in this message: the heredoc above is
+                  # UNQUOTED (it interpolates $DOMAIN), so shellcheck parses
+                  # this body as shell and reads a backtick pair as legacy
+                  # command substitution -- SC2006, which actionlint fails on.
                   print(
                       "\nA ModuleNotFoundError for a third-party package usually means "
                       "this integration imports a CORE COMPONENT it does not declare in "
-                      "manifest.json `dependencies`. A core integration's requirements "
-                      "are installed when it is set up, so an undeclared one is absent "
-                      "here -- and absent on any instance that does not happen to set it "
-                      "up. Declare the component, do not add its packages to this "
-                      "manifest's `requirements`."
+                      "the dependencies list of its manifest.json. A core integration's "
+                      "requirements are installed when it is set up, so an undeclared "
+                      "one is absent here -- and absent on any instance that does not "
+                      "happen to set it up. Declare the component; do not add its "
+                      "packages to this manifest's own requirements."
                   )
               sys.exit(f"{len(failed)} module(s) failed to import against real core")
           print(f"imported {len(mods) + 1} modules cleanly")
